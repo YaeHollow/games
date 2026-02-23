@@ -12,7 +12,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100vh;
+    min-height: 100vh;
     font-family: Arial, sans-serif;
     color: white;
     user-select: none;
@@ -69,6 +69,16 @@
     color: #4ecca3;
     min-height: 18px;
     text-align: center;
+    padding: 0 10px;
+  }
+  #debugInfo {
+    margin-top: 6px;
+    font-size: 10px;
+    color: #666;
+    text-align: center;
+    word-break: break-all;
+    padding: 0 10px;
+    display: none;
   }
 </style>
 </head>
@@ -78,6 +88,7 @@
 <canvas id="canvas"></canvas>
 <div id="message"></div>
 <div id="submitStatus"></div>
+<div id="debugInfo"></div>
 <button id="restartBtn" onclick="startGame()">Play Again</button>
 
 <div id="controls">
@@ -90,15 +101,23 @@
 </div>
 
 <script>
-// ── Config — REPLACE with your Cloudflare Worker URL ──────────────────────────
+// ── Config ────────────────────────────────────────────────────────────────────
 const WORKER_URL = 'https://game-score-saver.zareiadrian11.workers.dev';
 
-// ── Read URL params passed by the bot ─────────────────────────────────────────
+// ── Safely read URL params ────────────────────────────────────────────────────
 const params   = new URLSearchParams(window.location.search);
-const CHAT_ID  = params.get('chat_id')  || '';
-const MSG_ID   = params.get('msg_id')   || '';
-const USER_ID  = params.get('user_id')  || '';
-const GAME     = params.get('game')     || 'snake';
+const CHAT_ID  = params.get('chat_id')   || '';
+const MSG_ID   = params.get('msg_id')    || '';
+const USER_ID  = params.get('user_id')   || '';
+const USER_NAME = decodeURIComponent(params.get('user_name') || 'Player');
+const GAME     = params.get('game')      || 'snake';
+
+// Show debug info on screen (remove in production if you want)
+function showDebug(msg) {
+  const el = document.getElementById('debugInfo');
+  el.style.display = 'block';
+  el.textContent   = msg;
+}
 
 // ── Canvas setup ──────────────────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
@@ -122,6 +141,7 @@ function startGame() {
   document.getElementById('restartBtn').style.display  = 'none';
   document.getElementById('message').textContent       = '';
   document.getElementById('submitStatus').textContent  = '';
+  document.getElementById('debugInfo').style.display   = 'none';
   updateScore();
   placeFood();
   clearInterval(gameLoop);
@@ -163,14 +183,10 @@ function update() {
 function draw() {
   ctx.fillStyle = '#16213e';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Food
   ctx.fillStyle = '#e94560';
   ctx.beginPath();
   ctx.arc(food.x * CELL + CELL/2, food.y * CELL + CELL/2, CELL/2 - 2, 0, Math.PI * 2);
   ctx.fill();
-
-  // Snake
   snake.forEach((s, i) => {
     ctx.fillStyle = i === 0 ? '#4ecca3' : '#45b393';
     ctx.beginPath();
@@ -190,9 +206,8 @@ function updateScore() {
 async function endGame() {
   clearInterval(gameLoop);
   running = false;
-  document.getElementById('message').textContent      = `Game Over! Final Score: ${score}`;
+  document.getElementById('message').textContent      = `Game Over! Score: ${score}`;
   document.getElementById('restartBtn').style.display = 'inline-block';
-
   if (score > 0) {
     await submitScore(score);
   }
@@ -202,36 +217,52 @@ async function submitScore(finalScore) {
   const statusEl = document.getElementById('submitStatus');
   statusEl.textContent = '⏳ Saving score...';
 
-  if (!CHAT_ID || !MSG_ID || !USER_ID) {
-    statusEl.textContent = '⚠️ Could not save score (missing session info).';
+  // Build the payload
+  const payload = {
+    user_id:    String(USER_ID),
+    score:      finalScore,
+    chat_id:    String(CHAT_ID),
+    message_id: String(MSG_ID),
+    game:       String(GAME),
+    user_name:  String(USER_NAME)
+  };
+
+  showDebug(`Sending: uid=${USER_ID} chat=${CHAT_ID} msg=${MSG_ID} score=${finalScore} name=${USER_NAME}`);
+
+  // Abort if missing critical params
+  if (!USER_ID || !CHAT_ID || !MSG_ID) {
+    statusEl.textContent = '⚠️ Missing session info — open game from group.';
+    showDebug(`Missing params! uid=${USER_ID} chat=${CHAT_ID} msg=${MSG_ID}`);
     return;
   }
 
   try {
     const response = await fetch(WORKER_URL, {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id:    USER_ID,
-        score:      finalScore,
-        chat_id:    CHAT_ID,
-        message_id: MSG_ID,
-        game:       GAME
-      })
+      body:    JSON.stringify(payload)
     });
 
-    const result = await response.json();
-    console.log('Score submit result:', result);
+    const text = await response.text();
+    showDebug(`Worker response (${response.status}): ${text}`);
+
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch {
+      statusEl.textContent = '⚠️ Unexpected response from server.';
+      return;
+    }
 
     if (result.ok) {
       statusEl.textContent = '✅ Score saved!';
     } else {
-      statusEl.textContent = '⚠️ Score could not be saved.';
-      console.error('Worker error:', result);
+      statusEl.textContent = `⚠️ Not saved: ${result.error || result.gist?.message || 'unknown'}`;
     }
+
   } catch (e) {
-    statusEl.textContent = '⚠️ Network error saving score.';
-    console.error('Fetch error:', e);
+    statusEl.textContent = `⚠️ Network error: ${e.message}`;
+    showDebug(`Fetch error: ${e.message}`);
   }
 }
 
@@ -242,7 +273,6 @@ canvas.addEventListener('touchstart', e => {
   touchStartY = e.touches[0].clientY;
   e.preventDefault();
 }, {passive: false});
-
 canvas.addEventListener('touchend', e => {
   const dx = e.changedTouches[0].clientX - touchStartX;
   const dy = e.changedTouches[0].clientY - touchStartY;
